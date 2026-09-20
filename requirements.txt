@@ -1,0 +1,15 @@
+# GameVoiceKey · 依赖列表
+# 打包后由 PyInstaller 集成到单 exe；开发期装这些就可以 `python launch.py`
+
+PySide6>=6.10
+numpy>=1.26
+psutil>=5.9
+pynput>=1.7
+keyboard>=0.13
+
+# 离线 ASR（首次启动可在高级设置页一键下载模型）
+# 注意：不在默认 requirements，避免 130MB+ 安装包；用户主动安装或用我们提供的模型
+# vosk>=0.3.45
+
+# sounddevice 自带 portaudio 二进制预编译包，安装即用
+sounddevice>=0.4

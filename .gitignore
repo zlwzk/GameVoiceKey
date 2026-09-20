@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+.idea/
+.vscode/
+*.user
+
+# 打包 / 运行产物
+build/
+dist/
+*.spec
+*.exe
+
+# 用户数据
+*.json.bak
+*.corrupt-*
+
+# 日志
+*.log
+
+# PyInstaller temp
+_pyinstaller/
