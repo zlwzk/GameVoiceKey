@@ -58,6 +58,17 @@ def run() -> int:
 
     apply_theme(app)
 
+    # 设备检测向导：在引擎启动前跑，避免麦克风被采集流占着测不出电平。
+    # 只在首次启动弹（走完会写进 settings.setup_wizard_done）。
+    from ..config import load_settings
+    from .first_run import run_wizard_if_needed
+
+    settings = load_settings()
+    try:
+        run_wizard_if_needed(settings)
+    except Exception as exc:  # noqa: BLE001 - 向导失败绝不能拦住主程序
+        get_logger().warning("设备检测向导异常: %s", exc)
+
     engine = get_engine()
     engine.start()
 

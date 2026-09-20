@@ -24,10 +24,10 @@ from .tray import TrayIcon
 LOGGER = get_logger()
 
 NAV = [
-    ("首页", "智能自动适配"),
+    ("首页", "选择当前游玩的游戏"),
     ("游戏配置", "管理多游戏配置"),
     ("语音按键编辑", "自定义短语 + 按键映射"),
-    ("高级设置", "进程 / 语音 / 热键"),
+    ("高级设置", "声音设备 / 进程 / 热键 / 备份"),
     ("日志与统计", "触发记录 / 成功率"),
     ("悬浮窗", "外观与位置"),
 ]
@@ -84,6 +84,13 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(0)
         sl.addWidget(self._nav, 1)
 
+        footer = QLabel(
+            f"v{__version__}\n配置存于 %APPDATA%\\GameVoiceKey\n升级覆盖 exe 不会丢配置"
+        )
+        footer.setObjectName("SidebarFooter")
+        footer.setWordWrap(True)
+        sl.addWidget(footer)
+
         layout.addWidget(sidebar)
 
         # ===== Stack =====
@@ -127,6 +134,28 @@ class MainWindow(QMainWindow):
     def goto(self, page: str) -> None:
         idx = PAGE_INDEX.get(page, 0)
         self._nav.setCurrentRow(idx)
+
+    def goto_editor_for(self, profile_id: str) -> None:
+        """跳到「语音按键编辑」页并载入指定配置.
+
+        首页「选择当前游玩的游戏」选完就走这里 —— 选完立刻能配键，
+        不用用户自己去另一个页面再找一遍。
+        """
+
+        try:
+            self.editor_page.load_profile(profile_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("载入配置失败: %s", exc)
+        self.goto("语音按键编辑")
+        # 让用户一眼看到「现在配的是哪个游戏」
+        self.statusBar().showMessage(f"正在配置「{self._profile_label(profile_id)}」", 4000)
+
+    def _profile_label(self, profile_id: str) -> str:
+        try:
+            profile = self.engine.profile_store.get(profile_id)
+        except Exception:  # noqa: BLE001
+            profile = None
+        return profile.name if profile else profile_id
 
     # ----- overlay 联动 -----
     def bind_overlay(self, overlay: OverlayWindow) -> None:

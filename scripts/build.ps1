@@ -53,6 +53,30 @@ if ($Clean -and (Test-Path "build")) {
 Write-Host ""
 Write-Host "==[3/4] PyInstaller packaging (a few minutes) =="
 
+# PyInstaller 覆盖产物前会删掉旧的 dist\$ExeName.exe。如果桌面上还开着
+# 上一版的 exe，文件被占用，删除就会失败 —— 报错长得像 PyInstaller 崩了，
+# 其实是「你自己的程序还开着」。这里先请掉旧进程、再清掉旧产物。
+$stale = Get-Process -Name $ExeName -ErrorAction SilentlyContinue
+if ($stale) {
+    Write-Host "[*] Found $($stale.Count) running $ExeName process(es); stopping them (they lock the output exe)"
+    $stale | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+}
+
+$oldExe = Join-Path $ProjectRoot "dist\$ExeName.exe"
+if (Test-Path $oldExe) {
+    for ($i = 1; $i -le 3; $i++) {
+        Remove-Item -Force $oldExe -ErrorAction SilentlyContinue
+        if (-not (Test-Path $oldExe)) { break }
+        Write-Host "[*] Old exe still locked, retrying ($i/3)..."
+        Start-Sleep -Seconds 2
+    }
+    if (Test-Path $oldExe) {
+        Write-Error "dist\$ExeName.exe is locked and cannot be removed. Close any running $ExeName and retry."
+        exit 4
+    }
+}
+
 # 本应用只用到 QtCore / QtGui / QtWidgets。
 # 不要 --collect-submodules PySide6（会把 WebEngine/Quick/Multimedia 等
 # 上百 MB 用不到的模块一起收进来），改为显式排除。

@@ -20,7 +20,7 @@ from .audio import AudioCapture
 from .config import Profile, ProfileStore, Settings, VoiceRule, load_settings
 from .keyboard_sim import GlobalHotkeyManager, InputSimulator, parse_key
 from .logs import get_logger, record_trigger
-from .process_monitor import ForegroundTracker, ProcessMonitor
+from .process_monitor import ForegroundTracker, ProcessMonitor, normalize_process_name
 from .transcriber import (EnergyTranscriber, Transcriber, TranscriptEvent, make_transcriber)
 
 LOGGER = get_logger()
@@ -304,6 +304,45 @@ class Engine:
     def current_profile(self) -> Profile | None:
         return self._current_profile
 
+    def adopt_process(self, process_name: str, *, display_name: str = "",
+                      window_title: str = "") -> Profile | None:
+        """把「用户手动选择的那款游戏」变成当前生效的 Profile。
+
+        与自动扫描的区别：这是用户明确指定的，所以**不受
+        auto_switch_enabled 影响**，一定切过去。
+
+        - 已有配置涵盖该进程 → 直接复用（绝不覆盖用户已有规则）
+        - 还没有配置 → 新建一份空配置，名字优先取窗口标题
+        """
+
+        from .config import Profile as _Profile
+        from .config import save_profile
+
+        key = normalize_process_name(process_name)
+        if not key:
+            return None
+
+        for profile in self.profile_store.all():
+            if any(normalize_process_name(p) == key for p in profile.processes):
+                self.switch_profile(profile.id)
+                LOGGER.info("复用已有配置「%s」接管进程 %s", profile.name, key)
+                return profile
+
+        # 窗口标题一般是最好看的游戏名，去掉常见的浏览器/后缀噪音
+        raw_name = (display_name or window_title or "").strip()
+        raw_name = re.sub(
+            r"\s*[-–—|]\s*(Google Chrome|Microsoft Edge|Mozilla Firefox|Brave|Opera).*$",
+            "", raw_name,
+        ).strip()
+        name = raw_name[:40] if raw_name else key[:1].upper() + key[1:]
+
+        profile = _Profile(name=name or key, processes=[key])
+        save_profile(profile)
+        self.profile_store.reload()
+        self.switch_profile(profile.id)
+        LOGGER.info("已接管进程 %s → 新建配置「%s」", key, profile.name)
+        return profile
+
     def set_settings(self, **kwargs) -> None:
         """更新 settings 字段并触发 reload."""
 
@@ -452,7 +491,7 @@ class Engine:
         fg = self.foreground.current()
         if fg.process_name:
             for proc in self._current_profile.processes:
-                if proc.lower().rstrip(".exe") == fg.process_name.lower().rstrip(".exe"):
+                if normalize_process_name(proc) == normalize_process_name(fg.process_name):
                     return True
         if self._current_profile.window_class and fg.class_name:
             if self._current_profile.window_class.lower() == fg.class_name.lower():

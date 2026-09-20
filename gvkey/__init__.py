@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __app_name__ = "GameVoiceKey"
 __app_display_name__ = "游戏语音按键自定义助手"
 __github_owner__ = "zlwzk"

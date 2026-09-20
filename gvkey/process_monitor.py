@@ -23,6 +23,20 @@ from .logs import get_logger
 LOGGER = get_logger()
 
 
+def normalize_process_name(name: str) -> str:
+    """把进程名归一化成「小写、无 .exe」，用于存进 Profile.processes 与比较。
+
+    **不要用 ``str.rstrip(".exe")``** —— rstrip 是按字符集裁剪的，
+    ``"gvkprobe".rstrip(".exe")`` 会得到 ``"gvkprob"``（把结尾的 e 也啃掉了），
+    于是「同一个进程」在存取两侧算出不同的名字，表现为**反复新建重复配置**。
+    """
+
+    key = (name or "").strip().lower()
+    if key.endswith(".exe"):
+        key = key[:-4]
+    return key.strip()
+
+
 @dataclass
 class ForegroundInfo:
     pid: int
@@ -131,10 +145,10 @@ class ProcessMonitor:
         self._unmatch_callbacks.append(cb)
 
     def set_whitelist(self, names: list[str]) -> None:
-        self._whitelist = [n.lower().rstrip(".exe") for n in names if n.strip()]
+        self._whitelist = [normalize_process_name(n) for n in names if n.strip()]
 
     def set_blacklist(self, names: list[str]) -> None:
-        self._blacklist = [n.lower().rstrip(".exe") for n in names if n.strip()]
+        self._blacklist = [normalize_process_name(n) for n in names if n.strip()]
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -177,7 +191,7 @@ class ProcessMonitor:
             if not p.enabled:
                 continue
             for proc in p.processes:
-                key = proc.lower().rstrip(".exe")
+                key = normalize_process_name(proc)
                 if key:
                     proc_targets.setdefault(key, []).append(p)
         if not proc_targets:
@@ -193,7 +207,7 @@ class ProcessMonitor:
                 continue
             if not name:
                 continue
-            key = name.rstrip(".exe")
+            key = normalize_process_name(name)
             if key in self._blacklist:
                 continue
             if self._whitelist and key not in self._whitelist:
@@ -234,3 +248,168 @@ class ProcessMonitor:
                     cb(chosen, info)
                 except Exception as exc:  # noqa: BLE001
                     LOGGER.warning("match callback error: %s", exc)
+
+
+# ============================================================
+# 「当前游玩的游戏」候选进程枚举
+# ============================================================
+#
+# 用于「让用户主动选择当前在玩的游戏」这一交互：
+# 只列出**有可见窗口**的进程 —— 后台服务、驱动、系统组件都不会出现，
+# 剩下的基本就是用户眼前看得见的程序，从中挑游戏一目了然。
+# ============================================================
+
+
+@dataclass
+class RunningApp:
+    """一个「用户看得见」的运行程序。"""
+
+    pid: int
+    process: str  # 小写、不含 .exe，用于写入 Profile.processes
+    display: str  # 原始进程名（带 .exe），用于展示
+    title: str  # 主窗口标题
+    path: str  # exe 完整路径（可能为空，权限不足时）
+
+    @property
+    def pretty(self) -> str:
+        return self.title or self.display
+
+
+# 这些窗口类是系统外壳 / 输入法 / 托盘，不是用户玩的东西
+_SHELL_WINDOW_CLASSES = {
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "Progman",
+    "WorkerW",
+    "ForegroundStaging",
+    "TaskManagerWindow",
+    "MultitaskingViewFrame",
+    "XamlExplorerHostIslandWindow",
+    "Windows.Internal.Shell.TabProxyWindow",
+    "ApplicationManager_DesktopShellWindow",
+}
+
+# 这些进程属于 Windows 自身
+_SHELL_PROCESSES = {
+    "explorer", "searchapp", "searchhost", "shellexperiencehost",
+    "startmenuexperiencehost", "textinputhost", "applicationframehost",
+    "systemsettings", "dwm", "winlogon", "csrss", "smss", "services",
+    "lsass", "svchost", "runtimebroker", "conhost", "sihost", "taskhostw",
+    "ctfmon", "fontdrvhost", "spoolsv", "audiodg", "registry",
+    "memcompression", "securityhealthservice", "securityhealthsystray",
+    "widgets", "widgetservice", "lockapp", "useroobebroker", "dllhost",
+    "wmiprvse", "taskmgr", "mmgaserver", "crashpad_handler",
+}
+
+# 我们自己的进程
+_SELF_PROCESSES = {"gamevoicekey", "python", "pythonw", "python3"}
+
+
+def _enum_top_windows() -> list[tuple[int, int, str, str]]:
+    """枚举所有「可见且有标题」的顶层窗口。
+
+    返回 ``[(hwnd, pid, title, class_name), ...]``。
+    非 Windows 或调用失败时返回空列表（调用方需要容错）。
+    """
+
+    if os.name != "nt":
+        return []
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+    except Exception:  # noqa: BLE001
+        return []
+
+    collected: list[tuple[int, int, str, str]] = []
+
+    try:
+        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _callback(hwnd, _lparam):  # type: ignore[no-untyped-def]
+            try:
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length <= 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = (buf.value or "").strip()
+                if not title:
+                    return True
+                cls_buf = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, cls_buf, 256)
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                collected.append((int(hwnd), int(pid.value), title, cls_buf.value or ""))
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+
+        user32.EnumWindows(enum_proc(_callback), 0)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("枚举窗口失败: %s", exc)
+        return []
+
+    return collected
+
+
+def list_running_apps(*, include_system: bool = False, limit: int = 200) -> list[RunningApp]:
+    """列出候选程序（默认过滤掉 Windows 自身组件）。
+
+    同一进程名只保留一条（优先保留有窗口标题的那条），按名称排序。
+    任何异常都吞掉并返回已经收集到的部分，保证 UI 不会崩。
+    """
+
+    by_name: dict[str, RunningApp] = {}
+
+    for _hwnd, pid, title, cls in _enum_top_windows():
+        if not include_system and cls in _SHELL_WINDOW_CLASSES:
+            continue
+        try:
+            proc = psutil.Process(pid)
+            raw = (proc.name() or "").strip()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+        if not raw:
+            continue
+
+        key = normalize_process_name(raw)
+        if not include_system and (key in _SHELL_PROCESSES or key in _SELF_PROCESSES):
+            continue
+
+        path = ""
+        try:
+            path = proc.exe() or ""
+        except Exception:  # noqa: BLE001
+            path = ""
+
+        old = by_name.get(key)
+        # 同一进程多个窗口：优先保留标题更长的（通常是主窗口）
+        if old is None or len(title) > len(old.title):
+            by_name[key] = RunningApp(pid=pid, process=key, display=raw, title=title, path=path)
+
+    apps = sorted(by_name.values(), key=lambda a: a.display.lower())
+    return apps[:limit]
+
+
+def is_probably_game(app: RunningApp) -> bool:
+    """粗判「像不像游戏」（仅用于在列表里把它们排前面，不做过滤）。
+
+    判断依据：exe 路径里有常见游戏平台目录，或进程名排除掉常见办公/浏览器。
+    """
+
+    path = (app.path or "").lower()
+    if any(marker in path for marker in (
+        "\\steamapps\\common\\", "\\steam\\", "\\epic games\\", "\\riot games\\",
+        "\\ubisoft\\", "\\origin\\", "\\ea games\\", "\\battle.net\\",
+        "\\wegame\\", "\\gog galaxy\\", "\\games\\",
+    )):
+        return True
+    return False
+

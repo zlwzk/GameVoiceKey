@@ -100,6 +100,40 @@ class AdvancedPage(QWidget):
 
         outer.addWidget(gb_data)
 
+        # ====== 声音设备（首次启动向导也写这里） ======
+        gb_dev = QGroupBox("声音设备")
+        devlay = QVBoxLayout(gb_dev)
+        dev_hint = QLabel("首次启动的检测向导会把选好的设备写到这里；随时可以重新检测。")
+        dev_hint.setObjectName("CardHint")
+        dev_hint.setWordWrap(True)
+        devlay.addWidget(dev_hint)
+
+        row_in = QHBoxLayout()
+        row_in.addWidget(QLabel("麦克风输入"))
+        self._cmb_mic = QComboBox()
+        row_in.addWidget(self._cmb_mic, 1)
+        devlay.addLayout(row_in)
+
+        row_out = QHBoxLayout()
+        row_out.addWidget(QLabel("扬声器输出"))
+        self._cmb_spk = QComboBox()
+        row_out.addWidget(self._cmb_spk, 1)
+        devlay.addLayout(row_out)
+
+        row_dev_btn = QHBoxLayout()
+        btn_wizard = QPushButton("重新检测麦克风 / 扬声器…")
+        btn_wizard.setObjectName("Primary")
+        btn_wizard.clicked.connect(self._open_device_wizard)
+        row_dev_btn.addWidget(btn_wizard)
+        btn_reload_dev = QPushButton("刷新设备列表")
+        btn_reload_dev.setObjectName("Ghost")
+        btn_reload_dev.clicked.connect(self._reload_devices)
+        row_dev_btn.addWidget(btn_reload_dev)
+        row_dev_btn.addStretch(1)
+        devlay.addLayout(row_dev_btn)
+
+        outer.addWidget(gb_dev)
+
         # ====== 进程自动识别 ======
         gb_proc = QGroupBox("进程自动识别")
         lay = QVBoxLayout(gb_proc)
@@ -253,7 +287,58 @@ class AdvancedPage(QWidget):
         self.ck_autostart.blockSignals(True)
         self.ck_autostart.setChecked(s.autostart_enabled)
         self.ck_autostart.blockSignals(False)
+        self._reload_devices()
         self._refresh_data_section()
+
+    # ----- 声音设备 -----
+
+    def _reload_devices(self) -> None:
+        """把当前系统的输入 / 输出设备填进下拉框。
+
+        设备 id 一律以 ``str`` 存进 itemData（设置字段本身也是 str），
+        避免 int / str 混用导致「明明选了却对不上」。
+        """
+
+        from ...audio import (default_input_device_id, default_output_device_id,
+                              list_input_devices, list_output_devices)
+
+        s: Settings = self.engine.settings
+
+        for combo, devices, current, default_id in (
+            (self._cmb_mic, list_input_devices(), s.asr_input_device,
+             default_input_device_id()),
+            (self._cmb_spk, list_output_devices(), s.asr_output_device,
+             default_output_device_id()),
+        ):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("跟随系统默认", "")
+            for dev in devices:
+                combo.addItem(f"{dev['name']}（{dev['channels']} 通道）", str(dev["id"]))
+            combo.blockSignals(False)
+
+            picked = -1
+            want = str(current) if current not in (None, "") else ""
+            if want:
+                for i in range(combo.count()):
+                    if str(combo.itemData(i)) == want:
+                        picked = i
+                        break
+            if picked < 0 and default_id is not None:
+                for i in range(combo.count()):
+                    if str(combo.itemData(i)) == str(default_id):
+                        picked = i
+                        break
+            combo.setCurrentIndex(max(0, picked))
+
+    def _open_device_wizard(self) -> None:
+        from ..first_run import DeviceTestWizard
+
+        wizard = DeviceTestWizard(self.engine.settings, first_run=False, parent=self)
+        wizard.exec()
+        self._reload_devices()
+        self.engine.reload()
+        self.reload()
 
     # ----- 数据与备份 -----
 
@@ -369,6 +454,8 @@ class AdvancedPage(QWidget):
         s.blacklist_processes = self._list_to_list(self._blacklist)
         s.asr_engine = "vosk" if self.cmb_engine.currentIndex() == 1 else "energy"
         s.asr_model = self._ed_model.text().strip()
+        s.asr_input_device = str(self._cmb_mic.currentData() or "")
+        s.asr_output_device = str(self._cmb_spk.currentData() or "")
         s.only_when_game_focused = self.ck_only_focused.isChecked()
         s.start_minimized = self.ck_start_minimized.isChecked()
         s.autostart_enabled = self.ck_autostart.isChecked()
@@ -380,6 +467,7 @@ class AdvancedPage(QWidget):
             blacklist_processes=s.blacklist_processes,
             asr_engine=s.asr_engine,
             asr_model=s.asr_model,
+            asr_input_device=s.asr_input_device,
         )
         self._save_hotkeys(silent=True)
         self._save_autostart(silent=True)

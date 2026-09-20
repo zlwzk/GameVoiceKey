@@ -156,7 +156,13 @@ class Settings:
     asr_engine: str = "energy"
     asr_model: str = ""
     asr_input_device: str = ""
+    asr_output_device: str = ""
     asr_language: str = "zh-CN"
+
+    # 启动向导（麦克风 / 扬声器测试）是否已走完。
+    # 放在 settings 里 —— 用户升级软件后不会被重新弹一遍。
+    setup_wizard_done: bool = False
+    setup_wizard_version: str = ""  # 走完向导时的软件版本，便于将来需要时重测
 
     hotkey_master_toggle: str = "Ctrl+Alt+V"
     hotkey_pause: str = "Ctrl+Alt+P"
@@ -324,10 +330,12 @@ def delete_profile(profile_id: str) -> None:
 def find_profile_by_process(proc_name: str) -> Profile | None:
     """根据进程名（不含 .exe，大小写不敏感）找匹配 Profile。"""
 
-    target = proc_name.lower().rstrip(".exe")
+    from .process_monitor import normalize_process_name
+
+    target = normalize_process_name(proc_name)
     for profile in list_profiles():
         for proc in profile.processes:
-            if proc.lower().rstrip(".exe") == target:
+            if normalize_process_name(proc) == target:
                 return profile
     return None
 

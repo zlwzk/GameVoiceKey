@@ -466,6 +466,116 @@ def test_settings_recover_from_bak() -> None:
     assert s.scan_interval_ms in (1111, 2222), f"应从 .bak 恢复，实际 {s.scan_interval_ms}"
 
 
+def test_running_apps_fields() -> None:
+    """枚举「用户看得见的程序」：字段齐全、进程名已归一化。"""
+
+    from gvkey.process_monitor import RunningApp, list_running_apps
+
+    apps = list_running_apps()
+    assert isinstance(apps, list)
+    for app in apps:
+        assert isinstance(app, RunningApp)
+        assert app.process, "进程名不能为空"
+        assert app.process == app.process.lower(), f"进程名应小写: {app.process}"
+        assert not app.process.endswith(".exe"), f"进程名不应带 .exe: {app.process}"
+        assert app.display, "展示名不能为空"
+        assert app.pretty, "标题为空时应回退到展示名"
+
+
+def test_process_name_normalization() -> None:
+    """进程名归一化不能误伤结尾字母（rstrip(".exe") 的经典坑）。"""
+
+    from gvkey.process_monitor import normalize_process_name as norm
+
+    assert norm("gvkprobe.exe") == "gvkprobe"
+    assert norm("gvkprobe") == "gvkprobe", "结尾的 e 不能被当成 .exe 的一部分啃掉"
+    assert norm("  Chrome.EXE  ") == "chrome"
+    assert norm("xex") == "xex", "中间的字符不能被动过"
+    assert norm("") == ""
+    assert norm(".exe") == ""
+
+
+def test_game_heuristic() -> None:
+    """游戏识别启发式：装在 Steam 库里的算游戏，记事本不算。"""
+
+    from gvkey.process_monitor import RunningApp, is_probably_game
+
+    game = RunningApp(
+        pid=1, process="eldenring", display="eldenring.exe", title="ELDEN RING",
+        path=r"C:\Program Files (x86)\Steam\steamapps\common\ELDEN RING\eldenring.exe",
+    )
+    assert is_probably_game(game) is True
+
+    tool = RunningApp(
+        pid=2, process="notepad", display="notepad.exe", title="无标题 - 记事本",
+        path=r"C:\Windows\System32\notepad.exe",
+    )
+    assert is_probably_game(tool) is False
+
+
+def test_adopt_process_creates_and_reuses() -> None:
+    """用户主动选进程：没有配置就建，有配置就复用，且不受自动切换开关影响。"""
+
+    from gvkey import config
+    from gvkey.engine import Engine
+
+    config.seed_if_empty()
+    eng = Engine()
+    eng.settings.auto_switch_enabled = False  # 手动选择必须照样生效
+
+    first = eng.adopt_process("gvkprobe", display_name="自检游戏", window_title="自检游戏 v1")
+    assert first is not None, "指定进程应创建配置"
+    assert first.name == "自检游戏"
+    assert "gvkprobe" in [p.lower() for p in first.processes]
+    assert eng.current_profile() is not None
+    assert eng.current_profile().id == first.id
+
+    again = eng.adopt_process("gvkprobe.exe", display_name="自检游戏", window_title="自检游戏 v1")
+    assert again is not None, "再次选择必须复用"
+    assert again.id == first.id, "重复选择同一进程不该新建第二份配置"
+
+    # 收尾，别把测试配置留给后续用例
+    (config.profiles_dir() / f"{first.id}.json").unlink(missing_ok=True)
+    eng.profile_store.reload()
+
+
+def test_wizard_flag_roundtrip() -> None:
+    """向导状态写进设置后能读回 —— 老用户升级不该被重弹一遍。"""
+
+    import gvkey
+    from gvkey.config import Settings, load_settings, save_settings
+
+    fresh = Settings()
+    assert fresh.setup_wizard_done is False
+
+    fresh.setup_wizard_done = True
+    fresh.setup_wizard_version = gvkey.__version__
+    fresh.asr_output_device = "7"
+    save_settings(fresh)
+
+    back = load_settings()
+    assert back.setup_wizard_done is True
+    assert back.setup_wizard_version == gvkey.__version__
+    assert back.asr_output_device == "7"
+
+
+def test_device_api_safe() -> None:
+    """设备枚举 / 测试音接口在无硬件或设备被占用时也必须安全返回。"""
+
+    from gvkey.audio import (list_input_devices, list_output_devices,
+                             play_test_tone, stop_test_tone)
+
+    for dev in list_input_devices() + list_output_devices():
+        assert isinstance(dev["id"], int)
+        assert dev["name"] is not None
+        assert dev["channels"] >= 1
+
+    # volume=0 保证静音，只验证接口行为（返回 bool）而不是真的发出声音
+    result = play_test_tone(duration_ms=80, volume=0.0)
+    assert isinstance(result, bool)
+    stop_test_tone()
+
+
 def test_readme_version_match() -> None:
     """README.md 项目状态行必须包含当前 __version__。"""
 
@@ -474,7 +584,7 @@ def test_readme_version_match() -> None:
     if not readme.exists():
         return  # 没 README 不算失败（仓库 CI 自带可没有）
     text = readme.read_text(encoding="utf-8")
-    # README 里有 "v0.1.0" 这一段（任意一处出现即可）
+    # README 里任意一处出现当前版本号即可（一般是「项目状态」那行）
     assert gvkey.__version__ in text, (
         f"README.md does not contain version {gvkey.__version__}, "
         f"请在 README 项目状态行同步版本号。"
@@ -530,6 +640,12 @@ def main() -> int:
         test_upgrade_keeps_user_data,
         test_unknown_fields_preserved,
         test_settings_recover_from_bak,
+        test_running_apps_fields,
+        test_process_name_normalization,
+        test_game_heuristic,
+        test_adopt_process_creates_and_reuses,
+        test_wizard_flag_roundtrip,
+        test_device_api_safe,
         test_readme_version_match,
         test_release_notes_contain_current_version,
     ]
