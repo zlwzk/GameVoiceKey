@@ -24,3 +24,6 @@ dist/
 
 # PyInstaller temp
 _pyinstaller/
+
+# 提交消息临时文件
+.git_msg.txt

@@ -48,6 +48,16 @@
 - `load_settings()` 检测到 `schema_version` 落后时立即落盘迁移结果，避免重复计算。
 - 快照目录名冲突（同秒多次备份）自动加序号，列表顺序稳定。
 
+**打包体积 245MB → 59.5MB**
+
+v0.1.0 的打包脚本用 `--collect-submodules PySide6`，把 WebEngine / Quick /
+Multimedia 等上百 MB 用不到的 Qt 模块全收了进来。本应用只用到
+QtCore / QtGui / QtWidgets，现已改为显式排除清单，exe 从 245MB 降到 59.5MB，
+下载和启动都快了很多（功能一个没少，冒烟测试通过）。
+
+另外打包脚本改为直接调用 PyInstaller、不再做输出重定向：PyInstaller 的进度
+写 stderr，一旦被 PowerShell 包成 error record，脚本会误判失败。
+
 ### ✅ 自检
 
 `python -m scripts.selftest` —— **25 项断言全部通过**（v0.1.0 为 17 项）。
