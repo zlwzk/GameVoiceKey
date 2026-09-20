@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QApplication
 from .. import __app_display_name__, __app_name__, __version__
 from ..config import seed_if_empty
 from ..engine import get_engine
-from ..logs import setup_logging
+from ..logs import get_logger, setup_logging
+from ..userdata import bootstrap as bootstrap_userdata
 from .main_window import MainWindow
 from .theme import apply_theme
 from .tray import TrayIcon
@@ -39,6 +40,12 @@ def _make_default_icon() -> QIcon:
 
 def run() -> int:
     setup_logging("INFO")
+
+    # 数据隔离体检 + schema 迁移 + 升级自动快照。
+    # 必须在任何读写用户数据之前执行。
+    for notice in bootstrap_userdata():
+        get_logger().warning("%s", notice)
+
     seed_if_empty()
 
     app = QApplication(sys.argv)

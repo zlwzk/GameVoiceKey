@@ -51,9 +51,11 @@ def models_dir() -> Path:
 
 
 def backups_dir() -> Path:
-    p = user_data_dir() / "backups"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    """快照目录（实现见 gvkey.userdata，这里保留同名入口）。"""
+
+    from .userdata import backups_dir as _bd
+
+    return _bd()
 
 
 # ============================================================
@@ -113,6 +115,8 @@ class Profile:
     rules: list[VoiceRule] = field(default_factory=list)
     scenes: list[Scene] = field(default_factory=list)
     last_modified: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+    # 向前兼容：未知字段原样保留（同 Settings.extra）
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def all_phrases(self) -> list[tuple["VoiceRule", str]]:
         out: list[tuple["VoiceRule", str]] = []
@@ -169,6 +173,10 @@ class Settings:
     scan_interval_ms: int = 1500
     foreground_poll_ms: int = 250
 
+    # 向前兼容：如果读到「更高版本程序」写入的未知字段，原样保留，
+    # 下次保存再写回去。避免「新版本 → 旧版本 → 新版本」把设置丢掉。
+    extra: dict[str, Any] = field(default_factory=dict)
+
 
 # ============================================================
 # Profile 文件 IO
@@ -176,20 +184,38 @@ class Settings:
 
 
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
+    """原子写：先把旧内容滚成 ``.bak``，再临时文件 + replace。
+
+    这样任何一次写入之后都同时存在「新文件」和「上一版良好副本」，
+    即使新内容被人为改坏也能回退。
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        except OSError:
+            pass
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
 
+def _read_json(path: Path) -> dict[str, Any] | None:
+    with path.open("r", encoding="utf-8") as fh:
+        got = json.load(fh)
+    return got if isinstance(got, dict) else None
+
+
 def _safe_read(path: Path) -> dict[str, Any] | None:
+    """读 json：损坏时留证据（``.corrupt-*``）并尝试从 ``.bak`` 恢复。"""
+
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            return json.load(fh)
+        return _read_json(path)
     except FileNotFoundError:
         return None
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
         LOGGER.warning("无法解析 %s: %s", path, exc)
         if path.exists():
             try:
@@ -197,48 +223,73 @@ def _safe_read(path: Path) -> dict[str, Any] | None:
                 shutil.copy2(path, bak)
             except Exception:  # noqa: BLE001
                 pass
+
+        # 尝试从上次的良好副本恢复（这是「不丢数据」的最后一道闸）
+        sibling = path.with_suffix(path.suffix + ".bak")
+        if sibling.exists():
+            try:
+                recovered = _read_json(sibling)
+            except Exception:  # noqa: BLE001
+                recovered = None
+            if recovered is not None:
+                LOGGER.warning("已从 %s 恢复上次的良好配置", sibling.name)
+                try:
+                    _atomic_write(path, recovered)
+                except OSError:
+                    pass
+                return recovered
         return None
+
+
+def _known_fields(cls: type) -> set[str]:
+    return set(getattr(cls, "__dataclass_fields__", {}).keys())
+
+
+def _narrow(cls: type, raw: dict[str, Any], *, drop: tuple[str, ...] = ()) -> dict[str, Any]:
+    """只取 ``cls`` 认识的字段，避免高版本写的未知字段把构造打崩。"""
+
+    known = _known_fields(cls)
+    skip = set(drop)
+    return {k: v for k, v in raw.items() if k in known and k not in skip}
+
+
+def _collect_unknown(
+    cls: type, raw: dict[str, Any], *, drop: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """收集 ``cls`` 不认识的字段（含显式 drop 的），原样留待写回。"""
+
+    known = _known_fields(cls) | set(drop)
+    return {k: v for k, v in raw.items() if k not in known}
+
+
+def _make_rule(raw: dict[str, Any]) -> VoiceRule:
+    return VoiceRule(**_narrow(VoiceRule, raw))  # type: ignore[arg-type]
+
+
+def _make_scene(raw: dict[str, Any]) -> Scene:
+    s_rules = [_make_rule(r) for r in raw.get("rules", []) if isinstance(r, dict)]
+    s = Scene(**_narrow(Scene, raw, drop=("rules",)))  # type: ignore[arg-type]
+    s.rules = s_rules
+    return s
 
 
 def _profile_to_dict(p: Profile) -> dict[str, Any]:
     d = asdict(p)
+    extra = d.pop("extra", {}) or {}
+    d.update(extra)  # 未知字段平铺回顶层
     d["type"] = "profile"
+    d["schema_version"] = SCHEMA_VERSION
     return d
 
 
 def _dict_to_profile(d: dict[str, Any]) -> Profile:
-    rules = [VoiceRule(**r) for r in d.get("rules", []) if isinstance(r, dict)]
-    scenes = []
-    for s in d.get("scenes", []):
-        s_rules = [VoiceRule(**r) for r in s.get("rules", []) if isinstance(r, dict)]
-        scenes.append(Scene(
-            id=s.get("id", uuid.uuid4().hex[:8]),
-            name=s.get("name", "新场景"),
-            enabled=s.get("enabled", True),
-            rules=s_rules,
-        ))
-    return Profile(
-        id=d.get("id", uuid.uuid4().hex[:8]),
-        name=d.get("name", "未命名游戏"),
-        processes=list(d.get("processes", [])),
-        window_title_regex=d.get("window_title_regex", ""),
-        window_class=d.get("window_class", ""),
-        pin=bool(d.get("pin", False)),
-        enabled=bool(d.get("enabled", True)),
-        sensitivity=float(d.get("sensitivity", 0.5)),
-        phrase_similarity=float(d.get("phrase_similarity", 0.7)),
-        denoise=bool(d.get("denoise", True)),
-        silence_lock_ms=int(d.get("silence_lock_ms", 600)),
-        debounce_ms=int(d.get("debounce_ms", 120)),
-        mouse_enabled=bool(d.get("mouse_enabled", True)),
-        keyboard_enabled=bool(d.get("keyboard_enabled", True)),
-        push_to_talk=bool(d.get("push_to_talk", False)),
-        push_to_talk_key=d.get("push_to_talk_key", ""),
-        blacklisted_phrases=list(d.get("blacklisted_phrases", [])),
-        rules=rules,
-        scenes=scenes,
-        last_modified=d.get("last_modified", datetime.now().isoformat(timespec="seconds")),
-    )
+    rules = [_make_rule(r) for r in d.get("rules", []) if isinstance(r, dict)]
+    scenes = [_make_scene(s) for s in d.get("scenes", []) if isinstance(s, dict)]
+    p = Profile(**_narrow(Profile, d, drop=("rules", "scenes", "extra")))  # type: ignore[arg-type]
+    p.rules = rules
+    p.scenes = scenes
+    p.extra = _collect_unknown(Profile, d, drop=("type", "schema_version"))
+    return p
 
 
 def list_profiles() -> list[Profile]:
@@ -288,14 +339,17 @@ def find_profile_by_process(proc_name: str) -> Profile | None:
 
 def _settings_to_dict(s: Settings) -> dict[str, Any]:
     d = asdict(s)
+    extra = d.pop("extra", {}) or {}
+    d.update(extra)  # 未知字段平铺回顶层
     d["type"] = "settings"
+    d["schema_version"] = SCHEMA_VERSION  # 写的时候总是升到当前
     return d
 
 
 def _dict_to_settings(d: dict[str, Any]) -> Settings:
-    known = set(Settings().__dataclass_fields__.keys())  # type: ignore[attr-defined]
-    clean = {k: v for k, v in d.items() if k in known}
-    return Settings(**clean)
+    s = Settings(**_narrow(Settings, d, drop=("extra",)))  # type: ignore[arg-type]
+    s.extra = _collect_unknown(Settings, d, drop=("type",))
+    return s
 
 
 def load_settings() -> Settings:
@@ -305,7 +359,12 @@ def load_settings() -> Settings:
         s = Settings()
         save_settings(s)
         return s
-    return _dict_to_settings(d)
+    s = _dict_to_settings(d)
+    file_schema = int(d.get("schema_version", SCHEMA_VERSION) or SCHEMA_VERSION)
+    if file_schema != SCHEMA_VERSION:
+        LOGGER.info("settings.json schema %s -> %s（已自动迁移）", file_schema, SCHEMA_VERSION)
+        save_settings(s)  # 立刻把迁移结果落盘，避免下次再算
+    return s
 
 
 def save_settings(s: Settings) -> None:

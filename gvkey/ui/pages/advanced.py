@@ -1,6 +1,7 @@
 """高级设置页."""
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from PySide6.QtCore import Qt
@@ -14,6 +15,14 @@ from ... import __app_name__, __version__
 from ...config import Settings, save_settings
 from ...engine import Engine
 from ...transcriber import VOSK_MODEL_PRESETS
+from ...userdata import (
+    backups_dir,
+    data_health,
+    delete_backup,
+    list_backups,
+    restore_backup,
+    snapshot,
+)
 from ...windows import get_autostart, remove_autostart, set_autostart, current_exe_path
 
 
@@ -36,6 +45,60 @@ class AdvancedPage(QWidget):
         hint = QLabel("设置会立即生效；自动保存到 settings.json。")
         hint.setObjectName("PageHint")
         outer.addWidget(hint)
+
+        # ====== 数据与备份（放在最前面：升级不丢数据是硬需求） ======
+        gb_data = QGroupBox("数据与备份")
+        dlay = QVBoxLayout(gb_data)
+
+        dlay.addWidget(QLabel("用户数据保存在独立目录，升级软件（覆盖 exe）不会影响这里。"))
+
+        row_dir = QHBoxLayout()
+        row_dir.addWidget(QLabel("数据目录"))
+        self._lbl_data_dir = QLabel("-")
+        self._lbl_data_dir.setObjectName("CardHint")
+        self._lbl_data_dir.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        row_dir.addWidget(self._lbl_data_dir, 1)
+        btn_open = QPushButton("打开文件夹")
+        btn_open.clicked.connect(self._open_data_dir)
+        row_dir.addWidget(btn_open)
+        dlay.addLayout(row_dir)
+
+        self._lbl_isolated = QLabel("-")
+        self._lbl_isolated.setObjectName("CardHint")
+        dlay.addWidget(self._lbl_isolated)
+
+        self._lbl_versions = QLabel("-")
+        self._lbl_versions.setObjectName("CardHint")
+        dlay.addWidget(self._lbl_versions)
+
+        row_bk = QHBoxLayout()
+        btn_snap = QPushButton("立即备份")
+        btn_snap.setObjectName("Primary")
+        btn_snap.clicked.connect(self._do_snapshot)
+        row_bk.addWidget(btn_snap)
+        btn_restore = QPushButton("恢复选中快照")
+        btn_restore.clicked.connect(self._restore_selected)
+        row_bk.addWidget(btn_restore)
+        btn_del = QPushButton("删除选中快照")
+        btn_del.clicked.connect(self._delete_selected)
+        row_bk.addWidget(btn_del)
+        btn_open_bk = QPushButton("打开备份目录")
+        btn_open_bk.setObjectName("Ghost")
+        btn_open_bk.clicked.connect(self._open_backups_dir)
+        row_bk.addWidget(btn_open_bk)
+        row_bk.addStretch(1)
+        dlay.addLayout(row_bk)
+
+        self._lbl_backup_count = QLabel("快照：0 份")
+        self._lbl_backup_count.setObjectName("CardHint")
+        dlay.addWidget(self._lbl_backup_count)
+
+        # 时间 / 大小用原生 Label 展示（不是输入框），列表只做选择
+        self._lst_backups = QListWidget()
+        self._lst_backups.setMaximumHeight(120)
+        dlay.addWidget(self._lst_backups)
+
+        outer.addWidget(gb_data)
 
         # ====== 进程自动识别 ======
         gb_proc = QGroupBox("进程自动识别")
@@ -190,6 +253,94 @@ class AdvancedPage(QWidget):
         self.ck_autostart.blockSignals(True)
         self.ck_autostart.setChecked(s.autostart_enabled)
         self.ck_autostart.blockSignals(False)
+        self._refresh_data_section()
+
+    # ----- 数据与备份 -----
+
+    def _refresh_data_section(self) -> None:
+        health = data_health()
+        self._lbl_data_dir.setText(str(health["data_dir"]))
+        if health["isolated"]:
+            self._lbl_isolated.setText("✔ 与程序目录已分离：升级覆盖 exe 不会丢失数据")
+        else:
+            self._lbl_isolated.setText("⚠ 数据目录与程序目录重叠，请尽快改回 %APPDATA%！")
+        last = str(health["last_version"])
+        if last in ("-", __version__):
+            self._lbl_versions.setText(f"当前版本：v{__version__}")
+        else:
+            self._lbl_versions.setText(
+                f"上次运行：v{last}  →  当前版本：v{__version__}（升级前已自动备份）"
+            )
+        self._reload_backup_list()
+
+    def _reload_backup_list(self) -> None:
+        self._lst_backups.clear()
+        items = list_backups()
+        for b in items:
+            mb = b.size_bytes / (1024 * 1024)
+            size = f"{mb:.1f} MB" if mb >= 0.1 else f"{b.size_bytes / 1024:.0f} KB"
+            it = QListWidgetItem(f"{b.label}  ·  {b.file_count} 个文件  ·  {size}")
+            it.setData(Qt.UserRole, b.name)
+            self._lst_backups.addItem(it)
+        self._lbl_backup_count.setText(f"快照：{len(items)} 份（自动保留最近 8 份）")
+
+    def _open_data_dir(self) -> None:
+        from ...logs import user_data_dir
+
+        self._open_in_explorer(user_data_dir())
+
+    def _open_backups_dir(self) -> None:
+        self._open_in_explorer(backups_dir())
+
+    def _open_in_explorer(self, path) -> None:
+        import subprocess
+
+        try:
+            target = str(path)
+            if os.name == "nt":
+                os.startfile(target)  # noqa: S606
+            else:
+                subprocess.Popen(["xdg-open", target])
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "打开失败", f"无法打开目录：{exc}")
+
+    def _do_snapshot(self) -> None:
+        target = snapshot("manual")
+        self._reload_backup_list()
+        if target is None:
+            QMessageBox.information(self, "备份", "当前没有可备份的数据。")
+        else:
+            QMessageBox.information(self, "备份完成", f"已备份到快照：\n{target.name}")
+
+    def _restore_selected(self) -> None:
+        it = self._lst_backups.currentItem()
+        if it is None:
+            QMessageBox.information(self, "恢复", "请先在列表里选择一份快照。")
+            return
+        name = str(it.data(Qt.UserRole))
+        if QMessageBox.question(
+            self,
+            "确认恢复",
+            f"用快照覆盖当前设置？\n\n{name}\n\n（当前数据会先另存为 pre-restore 快照）",
+        ) != QMessageBox.Yes:
+            return
+        ok, msg = restore_backup(name)
+        if ok:
+            self.engine.reload()
+            self.reload()
+            QMessageBox.information(self, "已恢复", msg)
+        else:
+            QMessageBox.warning(self, "恢复失败", msg)
+
+    def _delete_selected(self) -> None:
+        it = self._lst_backups.currentItem()
+        if it is None:
+            return
+        name = str(it.data(Qt.UserRole))
+        if QMessageBox.question(self, "确认删除", f"删除快照？不可恢复。\n\n{name}") != QMessageBox.Yes:
+            return
+        delete_backup(name)
+        self._reload_backup_list()
 
     def _refresh_model_status(self) -> None:
         from ...config import models_dir

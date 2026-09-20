@@ -23,12 +23,15 @@ from typing import Any
 # ============================================================
 
 def user_data_dir() -> Path:
-    """用户数据根目录。"""
+    """用户数据根目录。
 
-    base = os.environ.get("APPDATA")
-    if not base:
-        base = str(Path.home())
-    return Path(base) / "GameVoiceKey"
+    统一走 :mod:`gvkey.userdata` 的解析逻辑（支持 ``GVKEY_DATA_DIR``
+    覆盖、并保证不会落在程序目录内 —— 否则升级覆盖 exe 会丢数据）。
+    """
+
+    from .userdata import _resolve_data_dir
+
+    return _resolve_data_dir()
 
 
 def logs_dir() -> Path:
