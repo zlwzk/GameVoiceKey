@@ -247,6 +247,38 @@ def test_overlay_window_smoke() -> None:
     # 不强制 show，避免 CI 失败
 
 
+def test_readme_version_match() -> None:
+    """README.md 项目状态行必须包含当前 __version__。"""
+
+    import gvkey
+    readme = Path("README.md")
+    if not readme.exists():
+        return  # 没 README 不算失败（仓库 CI 自带可没有）
+    text = readme.read_text(encoding="utf-8")
+    # README 里有 "v0.1.0" 这一段（任意一处出现即可）
+    assert gvkey.__version__ in text, (
+        f"README.md does not contain version {gvkey.__version__}, "
+        f"请在 README 项目状态行同步版本号。"
+    )
+
+
+def test_release_notes_contain_current_version() -> None:
+    """RELEASE_NOTES.md 必须以当前版本的标题开头。"""
+
+    import gvkey
+    p = Path("RELEASE_NOTES.md")
+    if not p.exists():
+        return
+    text = p.read_text(encoding="utf-8")
+    # 至少包含 "## vX.Y.Z" 这样的标题
+    import re
+    header_re = re.compile(rf"^##\s*v?{re.escape(gvkey.__version__)}", re.MULTILINE)
+    assert header_re.search(text), (
+        f"RELEASE_NOTES.md 缺少当前版本 {gvkey.__version__} 的标题。"
+        f"发版前请在最顶端新增 ## v{gvkey.__version__} - ... 章节。"
+    )
+
+
 # ============================================================
 # 入口
 # ============================================================
@@ -271,6 +303,8 @@ def main() -> int:
         test_engine_smoke,
         test_corrupt_backup_on_read,
         test_overlay_window_smoke,
+        test_readme_version_match,
+        test_release_notes_contain_current_version,
     ]
     for t in tests:
         runner.run(t.__name__, t)
