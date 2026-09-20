@@ -1,5 +1,13 @@
 <#
-scripts/smoke_exe.ps1 - 启动打包出来的 GameVoiceKey.exe 做无头冒烟
+scripts/smoke_exe.ps1 - launch packaged GameVoiceKey.exe in offscreen mode,
+wait a few seconds, kill it. Verifies the exe actually starts.
+
+Usage:
+    powershell -ExecutionPolicy Bypass -File scripts\smoke_exe.ps1
+
+Exit code:
+    0 = exe started and stayed alive
+    non-zero = something failed
 #>
 
 [CmdletBinding()]
@@ -14,11 +22,11 @@ Set-Location $ProjectRoot
 
 $exe = Join-Path $ProjectRoot $ExePath
 if (-not (Test-Path $exe)) {
-    Write-Error "找不到 $exe"
+    Write-Error "Missing $exe"
     exit 1
 }
 
-Write-Host "[*] 启动 $exe (offscreen + $WaitSeconds s)"
+Write-Host "[*] Launching $exe (offscreen, wait ${WaitSeconds}s)"
 $env:QT_QPA_PLATFORM = "offscreen"
 $env:GVK_SMOKE = "1"
 
@@ -26,15 +34,15 @@ $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds $WaitSeconds
 
 if ($proc.HasExited) {
-    Write-Error "进程已退出 (code=$($proc.ExitCode))"
+    Write-Error "Process exited early (code=$($proc.ExitCode))"
     exit 2
 }
 
 try {
     Stop-Process -Id $proc.Id -Force
-    Write-Host "[OK] exe 启动后存活 $WaitSeconds 秒"
+    Write-Host "[OK] exe alive ${WaitSeconds}s after launch"
     exit 0
 } catch {
-    Write-Error "smoke 失败: $_"
+    Write-Error "smoke failed: $_"
     exit 3
 }

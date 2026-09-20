@@ -1,4 +1,4 @@
-<#
+﻿<#
 scripts/build.ps1 - 打包 GameVoiceKey 为单文件 exe
 
 用法:
@@ -27,28 +27,28 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $ProjectRoot
 
-Write-Host "[*] 项目根目录: $ProjectRoot"
+Write-Host "[*] Project root: $ProjectRoot"
 
 Write-Host ""
-Write-Host "==[1/4] 跑自检 =="
+Write-Host "==[1/4] Running self-test =="
 python -m scripts.selftest
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "自检失败，中止打包"
+    Write-Error "Self-test failed, aborting"
     exit 1
 }
 
 if ($Clean -and (Test-Path "build")) {
     Write-Host ""
-    Write-Host "==[2/4] 清理旧 build =="
+    Write-Host "==[2/4] Cleaning old build =="
     Remove-Item -Recurse -Force build
     if (Test-Path "$ExeName.spec") { Remove-Item "$ExeName.spec" }
 } else {
     Write-Host ""
-    Write-Host "==[2/4] 跳过 clean（用 -Clean 才会清理）=="
+    Write-Host "==[2/4] Skipping clean (pass -Clean to clean) =="
 }
 
 Write-Host ""
-Write-Host "==[3/4] PyInstaller 打包（这步要几分钟）=="
+Write-Host "==[3/4] PyInstaller packaging (a few minutes) =="
 $args = @(
     "--noconfirm",
     "--onefile",
@@ -64,9 +64,21 @@ $args = @(
 )
 
 $pyi = Get-Command pyinstaller -ErrorAction SilentlyContinue
+$useModuleFallback = $false
 if (-not $pyi) {
-    Write-Error "找不到 pyinstaller，请先 pip install pyinstaller"
-    exit 2
+    $pyiCheck = & python -m PyInstaller --version 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "pyinstaller not found, run pip install pyinstaller"
+        exit 2
+    }
+    $useModuleFallback = $true
+}
+
+# 拼装调用方式
+if ($useModuleFallback) {
+    $pyiExec = { & python -m PyInstaller @args }
+} else {
+    $pyiExec = { & $pyi.Source @args }
 }
 
 $errLog = Join-Path $env:TEMP "gvkey-build-stderr.log"
@@ -74,13 +86,25 @@ $outLog = Join-Path $env:TEMP "gvkey-build-stdout.log"
 if (Test-Path $errLog) { Remove-Item $errLog }
 if (Test-Path $outLog) { Remove-Item $outLog }
 
-$proc = Start-Process -FilePath $pyi.Source `
-    -ArgumentList $args `
-    -WorkingDirectory $ProjectRoot `
-    -NoNewWindow `
-    -PassThru `
-    -RedirectStandardOutput $outLog `
-    -RedirectStandardError $errLog
+$proc = if ($useModuleFallback) {
+    # python -m PyInstaller 也包装成 python.exe 调起
+    $argList = @("-m", "PyInstaller") + $args
+    $proc = Start-Process -FilePath "python.exe" `
+        -ArgumentList $argList `
+        -WorkingDirectory $ProjectRoot `
+        -NoNewWindow `
+        -PassThru `
+        -RedirectStandardOutput $outLog `
+        -RedirectStandardError $errLog
+} else {
+    $proc = Start-Process -FilePath $pyi.Source `
+        -ArgumentList $args `
+        -WorkingDirectory $ProjectRoot `
+        -NoNewWindow `
+        -PassThru `
+        -RedirectStandardOutput $outLog `
+        -RedirectStandardError $errLog
+}
 
 $lastLinesShown = @{}
 while (-not $proc.HasExited) {
@@ -101,28 +125,31 @@ while (-not $proc.HasExited) {
     }
 }
 
-$proc | Out-Null
+# 确保拿到可靠的 ExitCode
+$proc.WaitForExit()
+$exitCode = $proc.ExitCode
+if ($null -eq $exitCode) { $exitCode = 0 }
 
 Write-Host ""
 Write-Host "[pyinstaller] exitCode: $($proc.ExitCode)"
 if ($proc.ExitCode -ne 0) {
-    Write-Host "---- build-stdout.log 末尾 30 行 ----"
+    Write-Host "---- build-stdout.log last 30 lines ----"
     if (Test-Path $outLog) { Get-Content $outLog -Tail 30 }
-    Write-Host "---- build-stderr.log 末尾 30 行 ----"
+    Write-Host "---- build-stderr.log last 30 lines ----"
     if (Test-Path $errLog) { Get-Content $errLog -Tail 30 }
-    Write-Error "PyInstaller 失败"
+    Write-Error "PyInstaller failed"
     exit $proc.ExitCode
 }
 
 $exe = Join-Path $ProjectRoot "dist\$ExeName.exe"
 if (-not (Test-Path $exe)) {
-    Write-Error "找不到 $exe"
+    Write-Error "Missing $exe"
     exit 3
 }
 $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 Write-Host ""
-Write-Host "==[4/4] 打包成功 =="
+Write-Host "==[4/4] Packaging succeeded =="
 Write-Host "  -> $exe  ($size MB)"
 Write-Host ""
-Write-Host "下一步："
+Write-Host "Next:"
 Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\smoke_exe.ps1"
